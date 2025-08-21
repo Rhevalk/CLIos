@@ -13,11 +13,11 @@ void LittleFSInit_(lua_State *L)
 
     esp_err_t ret = esp_vfs_littlefs_register(&conf);
     if (ret != ESP_OK) {
-        ESP_LOGE(SYSTEM, "Failed to mount or format LittleFS (%s)", esp_err_to_name(ret));
+        LOG_E("Failed to mount or format LittleFS (%s)", esp_err_to_name(ret));
         return;
     }
 
-    ESP_LOGI(SYSTEM, "LittleFS mounted at %s", MOUNT_PATH);
+    LOG_E("LittleFS mounted at %s", MOUNT_PATH);
 }
 
 

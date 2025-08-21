@@ -26,8 +26,11 @@ int L_GPIO_MODE(lua_State *L) {
       .intr_type = GPIO_INTR_DISABLE
   };
 
+  
   gpio_config(&io_conf);
-
+  
+  gpio_set_level(_pin, false);
+  
   lua_pushboolean(L, 1); // return true kalau sukses
   return 1;
 }
@@ -35,7 +38,11 @@ int L_GPIO_MODE(lua_State *L) {
 int L_GPIO_WRITE(lua_State *L)
 {
   uint8_t _pin  = luaL_checkinteger(L, 1);
-  bool _value = luaL_checkinteger(L, 2);
+  uint8_t _value;
+  if(lua_isboolean(L, 2)) 
+    _value = lua_toboolean(L, 2); // true -> 1, false -> 0
+  else 
+    _value = luaL_checkinteger(L, 2);
 
   gpio_set_level(_pin, _value);
 

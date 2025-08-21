@@ -17,9 +17,6 @@
 //#include "os.h"
 #include "task.h"
 
-const char *SYSTEM = "SYS";
-const char *USER = "USER";
-
 lua_State *L = NULL;
 
 static void _UartInit(void) {
@@ -39,6 +36,7 @@ static void _UartInit(void) {
     uart_set_pin(UART_NUM_0, 1, 3, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 }
 
+
 // Hook function untuk menghentikan loop di Lua
 atomic_bool stop_flag = false;
 void interrupt_hook(lua_State *L, lua_Debug *ar) {
@@ -47,133 +45,132 @@ void interrupt_hook(lua_State *L, lua_Debug *ar) {
     }
 }
 
-
-char buffers[2][CHAR_BUFFER_SIZE];
-atomic_bool active_index = false;
 TaskHandle_t consumerTaskHandle;
 
-static char lua_buffer[1024];     // buffer multiline
-static size_t lua_buf_len = 0;    // panjang isi
+atomic_bool active_index = false;
+
+char buffer_perline[2][CHAR_BUFFER_SIZE];
+uint8_t buffer_perline_len[2];
+
+char buffer_multiline[LUA_BUFFER_SIZE];     // buffer multiline
+uint8_t buffer_multiline_len = 0;    // panjang isi
 
 void _HandleLuaCommand(void *pvParameters) {
-  char local_buffer[CHAR_BUFFER_SIZE];
+    for (;;) {
+        // tunggu notifikasi dari producer
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-  while (1) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        // ambil buffer aktif
+        bool idx = atomic_load(&active_index);
+        const char *buffer_local = buffer_perline[idx]; 
 
-    bool index = atomic_load(&active_index);
-    strncpy(local_buffer, buffers[index], CHAR_BUFFER_SIZE);
+        // cek ukuran
+        uint8_t len = buffer_perline_len[idx];
 
-    // Tambah input ke buffer multiline
-    size_t len = strlen(local_buffer);
-    if (lua_buf_len + len + 2 >= sizeof(lua_buffer)) {
-        ESP_LOGE(SYSTEM, "Input too long");
-        lua_buf_len = 0;
-        continue;
-    }
-    memcpy(lua_buffer + lua_buf_len, local_buffer, len);
-    lua_buf_len += len;
-    lua_buffer[lua_buf_len++] = '\n';
-    lua_buffer[lua_buf_len] = '\0';
+        // tambahkan ke multiline buffer
+        memcpy(buffer_multiline + buffer_multiline_len, buffer_local, len);
+        buffer_multiline_len += len;
+        buffer_multiline[buffer_multiline_len++] = '\n';
+        buffer_multiline[buffer_multiline_len]   = '\0';
 
-    // Bersihkan stack
-    lua_settop(L, 0);
-    lua_sethook(L, interrupt_hook, LUA_MASKCOUNT | LUA_MASKCALL | LUA_MASKRET, 10);
+        // reset state Lua VM + hook interrupt
+        lua_settop(L, 0);
+        lua_sethook(L, interrupt_hook, LUA_MASKCOUNT | LUA_MASKCALL | LUA_MASKRET, 100); //1000
 
-    // Coba compile dulu
-    int status = luaL_loadbuffer(L, lua_buffer, lua_buf_len, "line");
-    if (status == LUA_OK) {
-        // ✅ kode lengkap
-        status = lua_pcall(L, 0, LUA_MULTRET, 0);
-        if (status != LUA_OK) {
-            ESP_LOGE(SYSTEM, "Runtime error: %s", lua_tostring(L, -1));
-            lua_pop(L, 1);
-
-            atomic_store(&stop_flag, false); 
-            continue;
-        }
-        lua_buf_len = 0;
-        // ESP_LOGI(SYSTEM, ">");
-    } else {
-        const char *err = lua_tostring(L, -1);
-
-        if (err && strstr(err, "near <eof>")) {
-            // 🔍 kalau pesan error ada 'expected' juga → incomplete block
-            if (strstr(err, "expected")) {
-                ESP_LOGI(SYSTEM, "...");
+        // coba compile & jalankan
+        int status = luaL_loadbuffer(L, buffer_multiline, buffer_multiline_len, "line");
+        if (status == LUA_OK) {
+            status = lua_pcall(L, 0, LUA_MULTRET, 0);
+            if (status != LUA_OK) {
+                LOG_E("Runtime error: %s", lua_tostring(L, -1));
                 lua_pop(L, 1);
-                continue; // tunggu baris berikutnya
-            }
-
-            // coba sekali lagi dengan newline tambahan
-            lua_buffer[lua_buf_len++] = '\n';
-            lua_buffer[lua_buf_len] = '\0';
-            lua_settop(L, 0);
-            int retry = luaL_loadbuffer(L, lua_buffer, lua_buf_len, "line");
-            if (retry == LUA_OK) {
-                ESP_LOGI(SYSTEM, "...");
-                lua_pop(L, 1);
+                atomic_store(&stop_flag, false);
                 continue;
             }
+            buffer_multiline_len = 0;
+        }
+        else {
+            const char *err = lua_tostring(L, -1);
+
+            if (err && strstr(err, "near <eof>")) {
+                if (strstr(err, "expected")) {
+                    LOG_I("...");
+                    lua_pop(L, 1);
+                    continue; // incomplete → tunggu baris berikutnya
+                }
+
+                // coba lagi dengan newline tambahan
+                buffer_multiline[buffer_multiline_len++] = '\n';
+                buffer_multiline[buffer_multiline_len]   = '\0';
+                lua_settop(L, 0);
+
+                if (luaL_loadbuffer(L, buffer_multiline, buffer_multiline_len, "line") == LUA_OK) {
+                    LOG_I("...");
+                    lua_pop(L, 1);
+                    continue;
+                }
+            }
+
+            // ❌ syntax error
+            LOG_E("Syntax error: %s", err);
+            lua_pop(L, 1);
+            buffer_multiline_len = 0;
         }
 
-        // ❌ error nyata
-        ESP_LOGE(SYSTEM, "Syntax error: %s", err);
-        lua_pop(L, 1);
-        lua_buf_len = 0;
-        // ESP_LOGI(SYSTEM, ">");
+        // reset flag & hook
+        atomic_store(&stop_flag, false);
+        lua_sethook(L, NULL, 0, 0);
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
-
-    atomic_store(&stop_flag, false);
-    lua_sethook(L, NULL, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
 }
 
 // Task untuk CLI
 void _ShellTask(void *pvParameters) {
-    static char buffer[CHAR_BUFFER_SIZE]; // static
-    static size_t index = 0; // static
+    char buffer_input[CHAR_BUFFER_SIZE];
+    size_t index = 0;
     uint8_t data;
 
-    while (1) 
-    {
-        int len = uart_read_bytes(UART_NUM_0, &data, 1, pdMS_TO_TICKS(10));
-        if (len > 0) 
-        {
-          char c = (char)data;
+    for (;;) {
+        if (uart_read_bytes(UART_NUM_0, &data, 1, pdMS_TO_TICKS(10)) > 0) {
+            char c = (char)data;
 
-            if (c == 'q') { 
-                if(!atomic_load(&stop_flag)) {
+            // tombol quit
+            if (c == 'q') {
+                if (!atomic_load(&stop_flag)) {
                     atomic_store(&stop_flag, true);
-                    ESP_LOGI(SYSTEM, "Interrupt signal sent to Lua");
+                    LOG_I("Interrupt signal sent to Lua");
                 }
                 continue;
             }
 
-            if (c == '\r' || c == '\n') 
-            {
-                buffer[index] = '\0';
-                if (index > 0) 
-                {
-                  bool next_index = !atomic_load(&active_index);
+            // end of line
+            if (c == '\r' || c == '\n') {
+                if (index > 0) {
+                    buffer_input[index] = '\0';
 
-                  strncpy(buffers[next_index], buffer, CHAR_BUFFER_SIZE);
-                  // swap buffer atomik
-                  atomic_store(&active_index, next_index);
-                  // notifikasi ke consumer
-                  xTaskNotifyGive(consumerTaskHandle);
+                    bool next_index = !atomic_load(&active_index);
 
-                  ESP_LOGI(USER, "%s", buffer); // Log input
-                  //_HandleLuaCommand(buffer); // Handle root commands
-                  index = 0;
+                    size_t len = strlen(buffer_input);
+                    if (len >= CHAR_BUFFER_SIZE) {
+                        len = CHAR_BUFFER_SIZE - 1;
+                    }
+                    memcpy(buffer_perline[next_index], buffer_input, len);
+                    buffer_perline[next_index][len] = '\0';
+                    buffer_perline_len[next_index] = len;
+
+                    atomic_store(&active_index, next_index);
+                    xTaskNotifyGive(consumerTaskHandle);
+
+                    LOG_I("%s", buffer_input);
+                    index = 0;
                 }
-            } 
-
-            else if (index < sizeof(buffer) - 1)
-              buffer[index++] = c;
+            }
+            // karakter biasa
+            else if (index < CHAR_BUFFER_SIZE - 1) {
+                buffer_input[index++] = c;
+            }
         }
-        // printf("Free stack Task CLI: %d\n", uxTaskGetStackHighWaterMark(NULL));
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -182,34 +179,31 @@ SemaphoreHandle_t luaMutex;
 
 void app_main(void)
 {
-  _UartInit();
-
-    // Init mutex
+  // Init mutex
   luaMutex = xSemaphoreCreateMutex();
+
+  _UartInit();
   
   L = luaL_newstate();
   luaL_openlibs(L);
 
   LittleFSInit_(L);
   
-	// Registrasi modul ke Lua
-	luaL_requiref(L, "gpio", LUA_OPEN_GPIO, 1);
-	lua_pop(L, 1); 
-	
-	luaL_requiref(L, "fs", LUA_OPEN_FS, 1);
-	lua_pop(L, 1);
-	
-	//luaL_requiref(L, "os", LUA_OPEN_OS, 1);
-	//lua_pop(L, 1);
-
-  luaL_requiref(L, "task", LUA_OPEN_TASK, 1);
-	lua_pop(L, 1);
+// Registrasi modul ke Lua
+luaL_requiref(L, "gpio", LUA_OPEN_GPIO, 1); 
+luaL_requiref(L, "fs", LUA_OPEN_FS, 1);
+//luaL_requiref(L, "os", LUA_OPEN_OS, 1);
+luaL_requiref(L, "task", LUA_OPEN_TASK, 1);
+lua_pop(L, 1);
 
   xSemaphoreTake(luaMutex, portMAX_DELAY);
-  if(luaL_dofile(L, "/home/boot.lua") != LUA_OK) { 
-      printf("running boot.lua: %s\n", lua_tostring(L, -1));
-      lua_pop(L, 1);
+
+  if(luaL_dofile(L, "/home/boot.lua") != LUA_OK) 
+  { 
+    LOG_W("running boot.lua: %s\n", lua_tostring(L, -1));
+    lua_pop(L, 1);
   }
+
   xSemaphoreGive(luaMutex);
 
   xTaskCreate(_ShellTask, "Shell Task", 2048, NULL, 5, NULL);

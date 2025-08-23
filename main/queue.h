@@ -5,17 +5,10 @@
 #include "lauxlib.h" // Include necessary headers for Lua auxiliary functions
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-#include "global.h"
+#include "freertos/queue.h"
 
 typedef struct {
-    lua_State *L;
-    int func_ref;
-    TaskHandle_t task_handle;
-    QueueHandle_t queue;
-    bool stop_flag;
-} lua_task_param_t;
+    QueueHandle_t handle;
+} lua_queue_t;
 
-
-int LUA_OPEN_TASK( lua_State *L );
+int LUA_OPEN_QUEUE( lua_State *L );

@@ -3,7 +3,7 @@
 
 #define MOUNT_PATH "/home"
 
-void LittleFSInit_(lua_State *L)
+void _LittleFSInit(void)
 {   
     esp_vfs_littlefs_conf_t conf = {
         .base_path = MOUNT_PATH,             // mount point
@@ -16,8 +16,6 @@ void LittleFSInit_(lua_State *L)
         LOG_E("Failed to mount or format LittleFS (%s)", esp_err_to_name(ret));
         return;
     }
-
-    LOG_E("LittleFS mounted at %s", MOUNT_PATH);
 }
 
 
@@ -216,4 +214,4 @@ const luaL_Reg FS_LIB[] = {
   {NULL, NULL}
 };
 
-int LUA_OPEN_FS ( lua_State *L ) { luaL_newlib(L, FS_LIB); return 1; }
+int LUA_OPEN_FS ( lua_State *L ) { _LittleFSInit(); luaL_newlib(L, FS_LIB); return 1; }

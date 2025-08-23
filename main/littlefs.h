@@ -7,5 +7,4 @@
 #include "esp_err.h"
 #include "esp_littlefs.h"
 
-void LittleFSInit_(lua_State *L);
 int LUA_OPEN_FS(lua_State *L);

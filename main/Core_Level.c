@@ -1,7 +1,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdatomic.h>
-
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -11,14 +12,7 @@
 #include "lauxlib.h" // Include necessary headers for Lua auxiliary functions
 
 #include "global.h"
-#include "gpio.h"
-#include "littlefs.h"
-#include "os.h"
-#include "task.h"
-#include "queue.h"
-#include "mutex.h"
-#include "semaphore.h"
-#include "wifi.h"
+#include "init.h"
 
 lua_State *L = NULL;
 
@@ -120,15 +114,6 @@ void _ShellTask(void *pvParameters) {
         for (int i = 0; i < len; i++) {
             char c = (char)buffer_input[i];
 
-            // tombol quit
-            if (c == 'q') {
-                if (!atomic_load(&stop_flag)) {
-                    atomic_store(&stop_flag, true);
-                    LOG_I("Interrupt signal sent to Lua");
-                }
-                continue;
-            }
-
             // end of line
             if (c == '\r' || c == '\n') {
                 if (index > 0) {
@@ -147,8 +132,18 @@ void _ShellTask(void *pvParameters) {
 
                     LOG_I("%s", buffer_input);
                     index = 0;
+
+                    // tombol quit
+                    if (c == 'q') {
+                        if (!atomic_load(&stop_flag)) {
+                            atomic_store(&stop_flag, true);
+                            LOG_I("Interrupt signal sent to Lua");
+                        }
+                        continue;
+                    }
                 }
             }
+
             // karakter biasa
             else if (index < CHAR_BUFFER_SIZE - 1) {
                 buffer_input[index++] = c;
@@ -166,18 +161,9 @@ void app_main(void)
   
     L = luaL_newstate();
     luaL_openlibs(L);
-  
-    // Registrasi modul ke Lua
-    luaL_requiref(L, "os", LUA_OPEN_OS, 1);
-    luaL_requiref(L, "fs", LUA_OPEN_FS, 1);
-    luaL_requiref(L, "wifi", LUA_OPEN_WIFI, 1);
-    luaL_requiref(L, "gpio", LUA_OPEN_GPIO, 1); 
-    luaL_requiref(L, "task", LUA_OPEN_TASK, 1);
-    luaL_requiref(L, "queue", LUA_OPEN_QUEUE, 1);
-    luaL_requiref(L, "mutex", LUA_OPEN_MUTEX, 1);
-    luaL_requiref(L, "semaphore", LUA_OPEN_SEMAPHORE, 1);
-    lua_pop(L, 1);
 
+    _API_BINDING_C(L);
+  
     xSemaphoreTake(luaMutex, portMAX_DELAY);
     
     struct stat st;
